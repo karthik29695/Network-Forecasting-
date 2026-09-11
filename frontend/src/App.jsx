@@ -33,11 +33,51 @@ import {
   Bar 
 } from 'recharts';
 
-const THREAT_VECTORS = [
-  { id: "VEC-1", name: "DoS Volumetric Saturation", actor: "Slowloris / GoldenEye", target: "10.0.0.5:80", severity: "CRITICAL", prob: "99%", recommendation: "Enforce dynamic SYN-cookies & rate-limit TCP connections per IP" },
-  { id: "VEC-2", name: "SMB Named Pipe Injection", actor: "Lateral Movement", target: "10.0.0.5:445", severity: "HIGH", prob: "86%", recommendation: "Enforce SMB packet signing & block RPC inter-VLAN" },
-  { id: "VEC-3", name: "Stealth SYN Port Sweep", actor: "Reconnaissance", target: "Class C Subnet", severity: "MEDIUM", prob: "64%", recommendation: "Deploy dynamic rate-limiting on gateway edge" }
-];
+const SHAP_EXPLANATIONS = {
+  "Flow Pkts/s": "Extremely high packet rates indicate volumetric flooding (e.g., DoS/DDoS) intended to exhaust server resources.",
+  "Fwd Pkts/s": "High forward packet rates suggest a rapid automated script or flood originating from the attacker.",
+  "Bwd Pkts/s": "High backward packet rates can indicate a reflection attack or massive automated server responses.",
+  "Tot Fwd Pkts": "Anomalous total forward packets often point to sustained data transfers, tunneling, or brute-force attempts.",
+  "Tot Bwd Pkts": "Anomalous total backward packets suggest heavy server responses, common in data exfiltration or reflection DoS.",
+  "Flow Duration": "Unusual flow durations point toward 'low-and-slow' attacks (like Slowloris) or persistent C2 beaconing connections.",
+  "Flow IAT Mean": "Irregular inter-arrival times typically indicate automated command-and-control (C2) beaconing or slow-rate brute forcing.",
+  "Flow IAT Max": "Large gaps between packets are characteristic of persistent stealthy connections keeping sessions alive.",
+  "Fwd IAT Mean": "Anomalies in forward packet timing suggest automated attacker tools rather than natural human traffic.",
+  "Fwd Pkt Len Max": "Unusually large forward payloads can indicate forced buffer overflows, SQL injection payloads, or exploit deliveries.",
+  "Bwd Pkt Len Max": "Massive backward payloads strongly suggest unauthorized data exfiltration or database dumping from the server.",
+  "Pkt Len Mean": "An abnormal average packet length often reveals tunneling protocols or abnormal data payloads hidden in standard ports.",
+  "Pkt Len Var": "High packet length variance indicates highly irregular payloads, common in multi-stage exploits.",
+  "Init Fwd Win Byts": "Anomalous initial forward TCP window sizes often suggest stealth SYN scanning or custom exploit scripts bypassing standard OS networking stacks.",
+  "Init_Win_bytes_forward": "Anomalous initial forward TCP window sizes often suggest stealth SYN scanning or custom exploit scripts bypassing standard OS networking stacks.",
+  "Init Bwd Win Byts": "Irregular backward window sizes can reveal customized reverse-shells or anomalous server configurations.",
+  "SYN Flag Cnt": "Spikes in SYN flags are the primary indicator of TCP SYN floods or aggressive port scanning (Reconnaissance).",
+  "ACK Flag Cnt": "High ACK flag counts can indicate ACK floods or attempts to bypass stateless firewalls.",
+  "PSH Flag Cnt": "Frequent PSH (Push) flags often indicate interactive attacker sessions (like reverse shells) forcing immediate data processing.",
+  "RST Flag Cnt": "Spikes in RST flags suggest aggressive connection termination, often seen in port scanning or application-layer DoS.",
+  "Dst Port": "Targeting non-standard or administrative destination ports (e.g., 445, 3389, 22) usually indicates Lateral Movement or Credential Access attempts.",
+  "Protocol": "Anomalous protocol usage (e.g., unexpected UDP or ICMP traffic) can indicate covert channels or network mapping.",
+  "meta_log_flow_count": "A massive spike in total concurrent flows is the most reliable indicator of a distributed denial of service (DDoS) or aggressive subnet sweep.",
+  "meta_unique_protocols": "A sudden variety of protocols in a single window suggests comprehensive network mapping and reconnaissance.",
+  "meta_high_port_ratio": "A high ratio of ephemeral high ports indicates large-scale automated scripting, botnet activity, or massive outbound request flooding."
+};
+
+function getShapExplanation(featureName) {
+  if (!featureName) return "No anomalous features detected in this window.";
+  let baseFeature = featureName;
+  if (baseFeature.startsWith("mean_")) baseFeature = baseFeature.substring(5);
+  else if (baseFeature.startsWith("max_")) baseFeature = baseFeature.substring(4);
+  else if (baseFeature.startsWith("min_")) baseFeature = baseFeature.substring(4);
+  else if (baseFeature.startsWith("std_")) baseFeature = baseFeature.substring(4);
+  
+  const explanation = SHAP_EXPLANATIONS[baseFeature];
+  if (explanation) {
+    if (featureName.startsWith("max_")) return `(Peak Spike) ${explanation}`;
+    if (featureName.startsWith("mean_")) return `(Sustained Average) ${explanation}`;
+    if (featureName.startsWith("std_")) return `(High Volatility) ${explanation}`;
+    return explanation;
+  }
+  return "Anomalous deviations detected in this network telemetry feature.";
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('World Model');
@@ -180,8 +220,8 @@ export default function App() {
         sidebarOpen ? 'w-64' : 'w-20'
       }`}>
         <div>
-          <div className="p-4 border-b border-white/10 flex items-center justify-between">
-            <div className="flex items-center space-x-3 overflow-hidden">
+          <div className={`p-4 border-b border-white/10 flex ${sidebarOpen ? 'items-center justify-between' : 'flex-col items-center space-y-4'}`}>
+            <div className={`flex items-center ${sidebarOpen ? 'space-x-3 overflow-hidden' : 'justify-center'}`}>
               <div className="min-w-[32px] w-8 h-8 rounded-xl bg-emerald-800/40 border border-emerald-500/40 flex items-center justify-center shadow-lg shadow-emerald-950/60 backdrop-blur-md">
                 <ShieldCheck className="w-5 h-5 text-emerald-300" />
               </div>
@@ -194,7 +234,7 @@ export default function App() {
             </div>
             <button 
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-slate-400 hover:text-slate-200 transition border border-white/5"
+              className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-slate-400 hover:text-slate-200 transition border border-white/5 flex-shrink-0"
             >
               {sidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
             </button>
@@ -341,6 +381,16 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center space-x-4">
+                  <button 
+                    onClick={() => {
+                      setIsPlaying(true);
+                      alert("Live Traffic tracking mode engaged. Listening on local interfaces...");
+                    }}
+                    className="flex items-center space-x-2 px-3.5 py-2 rounded-xl bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-800/50 text-xs text-emerald-300 transition backdrop-blur-md font-mono"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    <span>TRACK LIVE TRAFFIC</span>
+                  </button>
                   <label className="cursor-pointer flex items-center space-x-2 px-3.5 py-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/10 text-xs text-slate-300 transition backdrop-blur-md font-mono">
                     <UploadCloud className="w-3.5 h-3.5 text-emerald-400" />
                     <span>{isUploading ? "COMPUTING INFERENCE..." : selectedFile ? selectedFile : "INGEST RAW PCAP / CSV"}</span>
@@ -387,10 +437,12 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-white/[0.03] border border-white/10 p-6 rounded-2xl backdrop-blur-2xl shadow-xl">
-                  <h2 className="text-[15px] font-semibold text-slate-100 mb-1">Explainability (SHAP / Gradient Weights)</h2>
-                  <p className="text-[12px] text-slate-400 mb-4">Input saliency gradients w.r.t attack head</p>
-                  <div className="h-60 w-full">
+                <div className="bg-white/[0.03] border border-white/10 p-6 rounded-2xl backdrop-blur-2xl shadow-xl flex flex-col">
+                  <div>
+                    <h2 className="text-[15px] font-semibold text-slate-100 mb-1">Explainability (SHAP / Gradient Weights)</h2>
+                    <p className="text-[12px] text-slate-400 mb-4">Input saliency gradients w.r.t attack head</p>
+                  </div>
+                  <div className="flex-1 min-h-[160px] w-full mb-5">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={shapFeatures} layout="vertical">
                         <XAxis type="number" domain={[0, 1]} stroke="#64748b" tick={{ fontSize: 11 }} />
@@ -409,6 +461,22 @@ export default function App() {
                         <Bar dataKey="importance" fill="#d97736" radius={[0, 4, 4, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
+                  </div>
+                  
+                  {/* TEXT EXPLANATION BOX */}
+                  <div className={`mt-auto p-4 rounded-xl shadow-inner border ${currentRisk >= 0.5 ? 'bg-amber-950/20 border-amber-900/40' : 'bg-white/[0.02] border-white/5'}`}>
+                    <div className={`flex items-center space-x-2 mb-1.5 ${currentRisk >= 0.5 ? 'text-amber-500' : 'text-slate-500'}`}>
+                      <Layers className="w-4 h-4" />
+                      <span className="text-xs font-mono font-semibold uppercase tracking-wider">
+                        {currentRisk >= 0.5 ? `PRIMARY INSIGHT: ${shapFeatures[0]?.feature || "None"}` : `NOMINAL VARIANCE: ${shapFeatures[0]?.feature || "None"}`}
+                      </span>
+                    </div>
+                    <p className={`text-[13px] font-sans leading-relaxed ${currentRisk >= 0.5 ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {currentRisk >= 0.5 
+                        ? getShapExplanation(shapFeatures[0]?.feature)
+                        : `Traffic is currently benign. While this feature had the highest mathematical variance in this window, it did not exceed thresholds for adversarial behavior.`
+                      }
+                    </p>
                   </div>
                 </div>
               </div>
@@ -523,18 +591,24 @@ export default function App() {
               <div className="grid grid-cols-3 gap-6">
                 <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 backdrop-blur-2xl shadow-xl">
                   <div className="text-[11px] font-sans font-medium uppercase tracking-wider text-slate-400 mb-1">NETWORK HEALTH INDEX</div>
-                  <div className="text-3xl font-semibold font-mono text-emerald-400">92.4%</div>
-                  <p className="text-[13px] text-slate-400 mt-2">Nominal baseline across 41 internal industrial subnets.</p>
+                  <div className={`text-3xl font-semibold font-mono ${uploadedResult?.detection_summary?.anomalous_windows_detected > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {uploadedResult?.detection_summary ? 
+                      ((1 - (uploadedResult.detection_summary.anomalous_windows_detected / uploadedResult.detection_summary.total_windows_evaluated)) * 100).toFixed(1) + '%' 
+                      : '100%'}
+                  </div>
+                  <p className="text-[13px] text-slate-400 mt-2">Nominal baseline across processed traffic sequences.</p>
                 </div>
                 <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 backdrop-blur-2xl shadow-xl">
                   <div className="text-[11px] font-sans font-medium uppercase tracking-wider text-slate-400 mb-1">PROACTIVE DEFENSE BUFFER</div>
-                  <div className="text-3xl font-semibold font-mono text-amber-300">+5.0 min</div>
+                  <div className="text-3xl font-semibold font-mono text-emerald-300">+{trajectoryData.length || 5} min</div>
                   <p className="text-[13px] text-slate-400 mt-2">Forward horizon lookahead before compromise cascades.</p>
                 </div>
                 <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 backdrop-blur-2xl shadow-xl">
-                  <div className="text-[11px] font-sans font-medium uppercase tracking-wider text-slate-400 mb-1">ISOLATION READINESS</div>
-                  <div className="text-3xl font-semibold font-sans text-rose-400">Armed</div>
-                  <p className="text-[13px] text-slate-400 mt-2">Autonomous micro-segmentation ready for deployment.</p>
+                  <div className="text-[11px] font-sans font-medium uppercase tracking-wider text-slate-400 mb-1">CURRENT POSTURE</div>
+                  <div className={`text-3xl font-semibold font-sans ${currentRisk >= 0.5 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    {currentRisk >= 0.5 ? 'Engaged' : 'Monitoring'}
+                  </div>
+                  <p className="text-[13px] text-slate-400 mt-2">Autonomous micro-segmentation readiness.</p>
                 </div>
               </div>
             </div>
@@ -554,26 +628,32 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {THREAT_VECTORS.map((vec) => (
-                  <div key={vec.id} className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 backdrop-blur-2xl shadow-xl flex justify-between items-center">
+                {currentRisk >= 0.5 ? (
+                  <div className="p-5 rounded-2xl bg-white/[0.03] border border-red-500/30 backdrop-blur-2xl shadow-xl flex justify-between items-center">
                     <div className="space-y-1">
                       <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-semibold text-red-400">{vec.id}</span>
-                        <span className="text-[14px] font-semibold text-slate-100 font-sans">{vec.name}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/60 border border-red-800/50 text-red-300">{vec.severity}</span>
+                        <span className="text-xs font-mono font-semibold text-red-400">VEC-{step}</span>
+                        <span className="text-[14px] font-semibold text-slate-100 font-sans">{currentWindow.current_stage || "Unknown Threat"}</span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/60 border border-red-800/50 text-red-300">{currentRisk > 0.8 ? "CRITICAL" : "HIGH"}</span>
                       </div>
                       <div className="text-[13px] text-slate-400 font-sans">
-                        Actor Signature: <span className="font-mono text-slate-300">{vec.actor}</span> ➔ Target: <span className="font-mono text-slate-300">{vec.target}</span>
+                        Target Asset: <span className="font-mono text-slate-300">{data.metadata?.target_asset || "Network Gateway"}</span> ➔ Risk Probability: <span className="font-mono text-red-300">{(currentRisk * 100).toFixed(1)}%</span>
                       </div>
                       <div className="text-[12px] text-emerald-300/90 font-sans pt-1">
-                        Recommended Defense: <span className="font-medium text-emerald-300">{vec.recommendation}</span>
+                        Recommended Defense: <span className="font-medium text-emerald-300">Quarantine subnet and analyze {shapFeatures[0]?.feature || "anomalous traffic"} spike</span>
                       </div>
                     </div>
-                    <button className="px-4 py-2 rounded-xl bg-emerald-800/60 hover:bg-emerald-700 text-white font-sans font-medium text-xs border border-emerald-500/40 shadow-lg shadow-emerald-950/50 transition">
-                      ENFORCE ACL
+                    <button className="px-4 py-2 rounded-xl bg-red-900/60 hover:bg-red-800 text-white font-sans font-medium text-xs border border-red-500/40 shadow-lg shadow-red-950/50 transition">
+                      ENFORCE ACL BLOCK
                     </button>
                   </div>
-                ))}
+                ) : (
+                  <div className="p-10 text-center rounded-2xl bg-white/[0.02] border border-white/5 backdrop-blur-2xl">
+                    <CheckCircle2 className="w-10 h-10 text-emerald-500/50 mx-auto mb-3" />
+                    <h3 className="text-slate-300 font-sans font-medium text-sm mb-1">No Active Threats Detected</h3>
+                    <p className="text-slate-500 text-xs font-sans">The world model predicts nominal behavior for the current time window.</p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -585,18 +665,22 @@ export default function App() {
               <p className="text-[13px] text-slate-400 font-sans mb-6">Autonomous mapping of predicted latent network states to enterprise tactics</p>
               
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10">
-                  <div className="text-emerald-400 font-mono font-semibold text-xs mb-2">TA0006 - CREDENTIAL ACCESS</div>
-                  <p className="text-slate-400 text-[13px] font-sans leading-relaxed">Repeated authentication flow attempts over standard remote management ports.</p>
-                </div>
-                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10">
-                  <div className="text-amber-400 font-mono font-semibold text-xs mb-2">TA0040 - DOS / DDOS IMPACT</div>
-                  <p className="text-slate-400 text-[13px] font-sans leading-relaxed">High volumetric saturation and anomalous packet length distribution collapses.</p>
-                </div>
-                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10">
-                  <div className="text-red-400 font-mono font-semibold text-xs mb-2">TA0008 - LATERAL MOVEMENT</div>
-                  <p className="text-slate-400 text-[13px] font-sans leading-relaxed">Subnet pivot attempts using named pipes and remote administrative shares.</p>
-                </div>
+                {currentRisk < 0.5 && !dynamicStages.some(stg => stg.prob >= 0.5) ? (
+                  <div className="col-span-3 p-10 rounded-xl bg-white/[0.02] border border-white/10 text-center">
+                    <ShieldCheck className="w-10 h-10 text-emerald-500/50 mx-auto mb-3" />
+                    <div className="text-emerald-400 font-mono font-semibold text-sm mb-2">NOMINAL OPERATION</div>
+                    <p className="text-slate-400 text-[13px] font-sans">No adversarial MITRE ATT&CK tactics detected in the current or forecasted latent states.</p>
+                  </div>
+                ) : (
+                  [...new Map(dynamicStages.filter(stg => stg.prob >= 0.5 && stg.stage !== "Benign" && stg.stage !== "Normal Operation").map(item => [item.stage, item])).values()].map((stg, idx) => (
+                    <div key={idx} className="p-4 rounded-xl bg-white/[0.02] border border-red-500/30">
+                      <div className="text-red-400 font-mono font-semibold text-xs mb-2 uppercase">{stg.stage}</div>
+                      <p className="text-slate-400 text-[13px] font-sans leading-relaxed">
+                        The tactical classifier has aligned the network physics for <b>{stg.label}</b> to this specific threat vector with {(stg.prob * 100).toFixed(1)}% confidence.
+                      </p>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           )}
@@ -604,40 +688,46 @@ export default function App() {
           {/* VIEW: REPORTS */}
           {activeTab === 'Reports' && (
             <div className="bg-white/[0.03] border border-white/10 p-6 rounded-2xl backdrop-blur-2xl shadow-xl">
-              <h2 className="text-lg font-semibold text-slate-100 font-sans mb-1">Empirical Benchmark: World Model vs Static ML</h2>
-              <p className="text-[13px] text-slate-400 font-sans mb-6">Validation across multi-stage kill chains in CIC-IDS2018</p>
+              <h2 className="text-lg font-semibold text-slate-100 font-sans mb-1">Live Session Ingestion Report</h2>
+              <p className="text-[13px] text-slate-400 font-sans mb-6">Real-time inference statistics for the currently tracked network traffic.</p>
 
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-white/10 text-slate-400 font-sans font-medium uppercase tracking-wider text-[11px]">
-                      <th className="py-3 px-4">DETECTION ENGINE</th>
-                      <th className="py-3 px-4">LEAD-TIME ADVANTAGE</th>
-                      <th className="py-3 px-4">F1-SCORE</th>
-                      <th className="py-3 px-4">FALSE POSITIVE RATE</th>
+                      <th className="py-3 px-4">METRIC</th>
+                      <th className="py-3 px-4">VALUE</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5 font-mono text-xs">
                     <tr>
-                      <td className="py-3 px-4 text-slate-300 font-sans">Logistic Regression Baseline</td>
-                      <td className="py-3 px-4 text-slate-400">0.0s (Alerts during exploit)</td>
-                      <td className="py-3 px-4 text-slate-400">0.0208</td>
-                      <td className="py-3 px-4 text-red-400/80">5.24%</td>
+                      <td className="py-3 px-4 text-slate-300 font-sans">Total Time Windows Evaluated</td>
+                      <td className="py-3 px-4 text-slate-400">{uploadedResult?.detection_summary?.total_windows_evaluated || data.total_steps} windows (1 min each)</td>
                     </tr>
-                    <tr className="bg-emerald-950/30 text-emerald-300 font-semibold">
-                      <td className="py-3 px-4 flex items-center space-x-2 font-sans">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Latent World Model (Trained)</span>
+                    <tr>
+                      <td className="py-3 px-4 text-slate-300 font-sans">Anomalous Windows Detected</td>
+                      <td className={`py-3 px-4 ${uploadedResult?.detection_summary?.anomalous_windows_detected > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                        {uploadedResult?.detection_summary?.anomalous_windows_detected || 0}
                       </td>
-                      <td className="py-3 px-4 text-emerald-400">+5.0 min (Forward Horizon)</td>
-                      <td className="py-3 px-4">0.5837</td>
-                      <td className="py-3 px-4 text-emerald-400">2.47%</td>
+                    </tr>
+                    <tr className="bg-white/[0.02]">
+                      <td className="py-3 px-4 text-slate-300 font-sans">Current Flow Throughput</td>
+                      <td className="py-3 px-4 text-slate-400">{currentWindow.flow_count} flows/min</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 text-slate-300 font-sans">Latest Peak Risk Probability</td>
+                      <td className={`py-3 px-4 ${(currentRisk * 100) > 50 ? 'text-red-400 font-bold' : 'text-slate-400'}`}>{(currentRisk * 100).toFixed(2)}%</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 px-4 text-slate-300 font-sans">Active Session ID</td>
+                      <td className="py-3 px-4 text-slate-400 truncate max-w-xs">{currentScenarioId}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
             </div>
           )}
+
 
         </div>
       </main>
