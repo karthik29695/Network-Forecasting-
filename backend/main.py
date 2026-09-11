@@ -62,6 +62,70 @@ def _load_checkpoint():
     cfg = ckpt.get("config", {})
     _k_steps = cfg.get("k_steps", 5)
     _window_size = cfg.get("window_size", "1min")
+
+import json
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+import torch
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+
+from model import (
+    LSTMWorldModel, ManualScaler, signed_log1p, normalize_col,
+    build_agg_names, MITRE_NAMES,
+)
+
+app = FastAPI(title="NCIIPC Cyber World Model Defense API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+BASE_DIR = Path(__file__).parent
+SCENARIOS_PATH = BASE_DIR / "scenarios.json"
+CHECKPOINT_PATH = BASE_DIR / "lstm_world_model.pth"
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ─── Load trained checkpoint once at startup ───────────────────────────────
+_checkpoint = None
+_model: Optional[LSTMWorldModel] = None
+_scaler: Optional[ManualScaler] = None
+_feature_cols: List[str] = []
+_seq_len: int = 5
+_best_threshold: float = 0.5
+_benign_mse_baseline: Optional[dict] = None
+_k_steps: int = 5
+_window_size: str = "1min"
+_agg_names: List[str] = []
+
+
+def _load_checkpoint():
+    global _checkpoint, _model, _scaler, _feature_cols, _seq_len
+    global _best_threshold, _benign_mse_baseline, _k_steps, _window_size, _agg_names
+
+    if not CHECKPOINT_PATH.exists():
+        # Server can still run in "static scenarios only" mode.
+        print(f"[warn] {CHECKPOINT_PATH} not found — /api/upload-csv will be disabled.")
+        return
+
+    ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    _feature_cols = ckpt["feature_cols"]
+    state_dim = ckpt["state_dim"]
+    _seq_len = ckpt["seq_len"]
+    _best_threshold = float(ckpt["best_threshold"])
+    _benign_mse_baseline = ckpt.get("benign_mse_baseline")
+    cfg = ckpt.get("config", {})
+    _k_steps = cfg.get("k_steps", 5)
+    _window_size = cfg.get("window_size", "1min")
     _agg_names = build_agg_names(_feature_cols)
 
     model = LSTMWorldModel(
@@ -232,17 +296,9 @@ def _format_horizon(k: int) -> str:
 
 
 def _scale_sequence(seq: np.ndarray, missing_feature_indices: list) -> np.ndarray:
-    n_feat = len(_feature_cols)
     seq_s = signed_log1p(seq.astype(np.float64))
     seq_sc = _scaler.transform(seq_s).astype(np.float32)
     seq_sc = np.clip(seq_sc, -3.0, 3.0)
-    # Zero out columns for features absent from the uploaded CSV, across
-    # each of the 4 aggregation blocks (mean/std/min/max).
-    for m_idx in missing_feature_indices:
-        for agg_offset in range(4):
-            col_idx = agg_offset * n_feat + m_idx
-            if col_idx < seq_sc.shape[1]:
-                seq_sc[:, col_idx] = 0.0
     return seq_sc
 
 
@@ -256,7 +312,9 @@ def _gradient_attribution(X_t: torch.Tensor, top_k: int = 3):
         pred_state, atk_log, mitre_log, (h_n, c_n) = _model(X_t)
         atk_log.squeeze().backward()
 
-    grads = np.abs(X_t.grad.detach().cpu().numpy().squeeze(0))  # (seq_len, state_dim)
+    grad_array = X_t.grad.detach().cpu().numpy().squeeze(0)
+    input_array = X_t.detach().cpu().numpy().squeeze(0)
+    grads = np.abs(grad_array * input_array)  # (seq_len, state_dim)
     per_dim = grads.mean(axis=0)  # importance per state dimension
     max_val = per_dim.max() if per_dim.max() > 0 else 1.0
     top_idx = np.argsort(per_dim)[::-1][:top_k]
@@ -280,6 +338,9 @@ def _k_step_trajectory(pred_state, atk_log, mitre_log, h_c) -> List[Dict]:
 
     atk_prob = torch.sigmoid(atk_log).item()
     mt_cls = int(mitre_log.argmax(dim=1).item())
+    if atk_prob < _best_threshold:
+        mt_cls = 0
+        
     trajectory.append({
         "step_ahead": _format_horizon(1),
         "prob": round(float(atk_prob), 4),
@@ -292,6 +353,9 @@ def _k_step_trajectory(pred_state, atk_log, mitre_log, h_c) -> List[Dict]:
             pred_state, atk_log, mitre_log, (h_n, c_n) = _model(next_input, (h_n, c_n))
             atk_prob = torch.sigmoid(atk_log).item()
             mt_cls = int(mitre_log.argmax(dim=1).item())
+            if atk_prob < _best_threshold:
+                mt_cls = 0
+                
             trajectory.append({
                 "step_ahead": _format_horizon(step + 1),
                 "prob": round(float(atk_prob), 4),
@@ -321,11 +385,14 @@ def _run_model_inference(states: np.ndarray, timestamps: list, counts: list,
         # evaluation (we already have the true next-window state, since this
         # is a completed window within the uploaded file).
         current_risk = attack_head_prob
+        calibrated_mse = None
+        mse_val = None
         if _benign_mse_baseline is not None:
             true_future = states[i + _seq_len].astype(np.float64)
             true_future_sc = _scaler.transform(
                 signed_log1p(true_future).reshape(1, -1)
             )[0]
+            true_future_sc = np.clip(true_future_sc, -3.0, 3.0)
             mse_val = float(np.mean((pred_state.cpu().numpy().flatten() - true_future_sc) ** 2))
             z = (mse_val - _benign_mse_baseline["mean"]) / (_benign_mse_baseline["std"] + 1e-8)
             calibrated_mse = 1 / (1 + np.exp(-(z - 3.0)))
@@ -338,6 +405,9 @@ def _run_model_inference(states: np.ndarray, timestamps: list, counts: list,
         # above instead of re-running the forward pass.
         trajectory = _k_step_trajectory(pred_state, atk_log, mitre_log, hc)
 
+        if current_risk < _best_threshold:
+            mitre_cls = 0
+
         windows_out.append({
             "step_index": len(windows_out),
             "timestamp": timestamps[i + _seq_len].strftime("%H:%M:%S"),
@@ -346,6 +416,15 @@ def _run_model_inference(states: np.ndarray, timestamps: list, counts: list,
             "current_stage": MITRE_NAMES.get(mitre_cls, "Unknown"),
             "trajectory": trajectory,
             "shap_features": shap_features,
+            # TEMPORARY diagnostics — remove once current_risk is verified.
+            # Lets you see whether the attack head or the reconstruction-
+            # error term is driving current_risk on a given window.
+            "_debug": {
+                "attack_head_prob": round(float(attack_head_prob), 4),
+                "calibrated_mse": round(float(calibrated_mse), 4) if calibrated_mse is not None else None,
+                "raw_mse": round(mse_val, 6) if mse_val is not None else None,
+                "benign_mse_baseline": _benign_mse_baseline,
+            },
         })
 
     return windows_out
@@ -384,6 +463,30 @@ async def upload_csv(file: UploadFile = File(...)):
 
     scenario_id = f"upload_{uuid.uuid4().hex[:10]}"
     n_attack = sum(1 for w in windows if w["current_risk"] >= _best_threshold)
+
+    # Flat detection log — mirrors the notebook's test_csv_file() console
+    # output ("Time | P(Attack) | Is Attack" + anomalous-window summary) so
+    # the frontend can render the same log/verdict view, not just the
+    # richer trajectory/SHAP view used for the story-mode scenarios.
+    detection_log = [
+        {
+            "timestamp": w["timestamp"],
+            "attack_prob": w["current_risk"],
+            "is_attack": w["current_risk"] >= _best_threshold,
+        }
+        for w in windows
+    ]
+    detection_summary = {
+        "model_threshold": _best_threshold,
+        "total_windows_evaluated": len(windows),
+        "anomalous_windows_detected": n_attack,
+        "verdict": (
+            "ATTACK DETECTED - malicious traffic flagged in this capture."
+            if n_attack > 0
+            else "No attack detected in this capture."
+        ),
+    }
+
     scenario_entry = {
         "metadata": {
             "name": f"Ingested Dataset: {file.filename}",
@@ -406,6 +509,8 @@ async def upload_csv(file: UploadFile = File(...)):
         "status": "success",
         "scenario_id": scenario_id,
         "filename": file.filename,
+        "detection_log": detection_log,
+        "detection_summary": detection_summary,
         **scenario_entry,
     }
 

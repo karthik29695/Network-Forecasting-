@@ -1,1 +1,28 @@
-\venv
+# Environments
+venv/
+env/
+.env
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend (fallback, since frontend has its own)
+node_modules/
+dist/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Data & Models
+*.csv
+# Note: lstm_world_model.pth (4.6MB) and scenarios.json are small enough to be pushed
+# but if scenarios.json updates constantly, you might want to run:
+# git update-index --assume-unchanged backend/scenarios.json
